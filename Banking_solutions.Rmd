@@ -1,0 +1,313 @@
+---
+Title: "Smartwatch adoption"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# load packages
+# if you don't have these packages use install.packages("glmnet") and install.packages("openxlsx") first
+library(glmnet)
+library(openxlsx)
+library(caret)
+library(fastDummies)
+
+```
+
+
+```{r}
+# read dataset
+data <- read.csv("~/Downloads/bank-additional.csv", sep = ";")
+#summary(data)
+#head(data)
+
+# first, apply min-max normalization
+# alternatively you can also standardize the data by subtracting mean and dividing by sd of the variable
+
+# normalize and randomize data
+maxs <- apply(data, 2, max) 
+mins <- apply(data, 2, min)
+
+data <- data[sample(1:nrow(data)),]
+data$y <- 1*(data$y == "yes")
+
+```
+
+## Convert categorical values to dummies
+
+```{r}
+categorical.vars <- colnames(data)[
+  which(sapply(data,
+               function(x) mode(x)=="character"))]
+data_numeric <- data[, !colnames(data) %in% categorical.vars, 
+                          drop=FALSE]
+data_cat <- data[, colnames(data) %in% categorical.vars, drop=FALSE]
+
+library(fastDummies)
+
+data_cat <- dummy_cols(data_cat)
+data<- cbind(data, data_cat)
+```
+
+```{r}
+
+# split the data into train and test
+set.seed(40)
+
+# split the data into 80 and 20% for training and test
+smp_size <- floor(0.8 * nrow(data))
+train_ind <- sample(seq_len(nrow(data)), size = smp_size)
+
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+
+train <- train[, !colnames(train) %in% categorical.vars, drop=FALSE]
+test <- test[, !colnames(test) %in% categorical.vars, drop=FALSE]
+
+
+```
+
+```{r}
+m_lasso_train <- glmnet(train[,-11], train$y, alpha=1, family="binomial")
+l = mean(m_lasso_train$lambda)
+coef(m_lasso_train, s=l)
+
+# 7 variables remain in the lasso model, including the intercept.
+# these are duration, pdays, nr.employed , month_mar, month_may, poutcome_success 
+```
+
+## Logistic-Lasso
+
+```{r}
+plot(m_lasso_train, xvar = "lambda")
+
+# as lambda penalty increases, fewer variables remain in the lasso model
+```
+
+```{r}
+# as an example, let's use the model with mean lambda i.e., lamba = l
+m_lasso_train <- glmnet(train[,-11], train$y, alpha=1, family="binomial", lambda = l)
+
+# write a function to compute model accuracy of lasso using mean value of lambda as an example. In cross-validation models, we will use minimum lambda.
+accuracy_lasso <- function(model, IV, DV){
+  # model is a glmnt lasso object
+  if (class(model)[1] == "cv.glmnet"){
+    lambda = model$lambda.1se
+  } else {
+    lambda = mean(model$lambda)
+  }
+  fit <- predict(model, newx = IV, type="response", s=lambda)
+  answer = ((sum(1*(fit > 0.5) == DV))/length(DV))*100
+  return(answer)
+}
+
+# Compute logistic accuracy on training data
+A = round(accuracy_lasso(m_lasso_train, as.matrix(train[,-11]), train$y), 2)
+cat ("Accuracy on training set is", A, "%")
+
+# accuracy on test data 
+X <- as.matrix((test[,-11]))
+predicted_probabilities <- predict(m_lasso_train, newx = X, type = "response")
+test_predictions <- 1*(predicted_probabilities > 0.5)
+
+# accuracy on test data - compute by comparing how often predicted Adoption in test_predictions is same as observed Adopt column in the test data)
+A <- (sum(test_predictions == test$y,3)/nrow(test)) * 100
+# or A <- (sum(test_predictions == test[,1],3)/nrow(test)) * 100
+
+cat ("Accuracy on test set is", A, "%")
+
+# without cross-validation, we don't know if we chose the right value for lambda
+# let's try cross-validation next
+
+```
+
+## Additional model: Logistic-Lasso Cross-validated 5-fold
+
+```{r}
+# store train data into X (all covariates) and Y (DV = 'Adopt')
+X <- as.matrix(train[,-11])
+Y <- train$y
+
+# Cross-validated lasso model with five folds and choose the lambda at lambda.min value
+m_lasso_train <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds=5, type.measure = "class")
+l = m_lasso_train$lambda.min
+coef(m_lasso_train, s=l)
+
+# Optional accuracy on training data
+A = round(accuracy_lasso(m_lasso_train, X, Y), 2)
+cat ("Accuracy on training set is", A, "%")
+
+# accuracy on test data 
+X <- as.matrix((test[,-11]))
+predicted_probabilities <- predict(m_lasso_train, newx = X, type = "response")
+test_predictions <- 1*(predicted_probabilities > 0.5)
+
+# accuracy on test data - compute by comparing how often predicted Adoption in test_predictions is same as observed Adopt column in the test data)
+A <- (sum(test_predictions == test$y,3)/nrow(test)) * 100
+# or A <- (sum(test_predictions == test[,1],3)/nrow(test)) * 100
+
+cat ("Accuracy on test set is", A, "%")
+
+# overall, compared to the mean lambda which gave us accuracy of 76%, using the cross-validated lambda gives us higher accuracy of about 78%.
+
+
+```
+
+Coefficient path
+
+```{r, echo=FALSE}
+plot(m_lasso_train)
+```
+
+## Logistic-Lasso Cross-validated 15-fold
+
+```{r}
+# store train data into X (all covariates) and Y (DV = 'Adopt')
+X <- as.matrix(train[,-11])
+Y <- train$y
+
+# Cross-validated lasso model with fifteen folds
+m_lasso_train <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds=15, type.measure = "class")
+
+l = m_lasso_train$lambda.min
+coef(m_lasso_train, s=l)
+
+# Optional accuracy on training data
+A = round(accuracy_lasso(m_lasso_train, X, Y), 2)
+cat ("Accuracy on training set is", A, "%")
+
+# accuracy on test data 
+X <- as.matrix((test[,-11]))
+predicted_probabilities <- predict(m_lasso_train, newx = X, type = "response")
+test_predictions <- 1*(predicted_probabilities > 0.5)
+
+# accuracy on test data - compute by comparing how often predicted Adoption in test_predictions is same as observed Adopt column in the test data)
+A <- (sum(test_predictions == test$y,3)/nrow(test)) * 100
+# or A <- (sum(test_predictions == test[,1],3)/nrow(test)) * 100
+
+cat ("Accuracy on test set is", A, "%")
+
+# overall, compared to the mean lambda which gave us accuracy of 76%, using the cross-validated lambda gives us higher accuracy of about 78%.
+
+```
+
+```{r, echo=FALSE}
+plot(m_lasso_train)
+```
+
+
+
+**Takeaway 1**: LASSO tuning parameter can be used to trade-off between bias and variance. Higher tuning parameter results in more penalty for complexity and hence, results in lesser number of coefficients selected. This may result in some bias and lower prediction accuracy, but makes the model less prone to over-fitting.
+
+```{r}
+# try lasso for CV folds = 6...10 using lambda.min. 
+
+for(k in 6:10){
+  # store train data into X (all covariates) and Y (DV = 'Adopt')
+X <- as.matrix(train[,-11])
+Y <- train$y
+
+# Cross-validated lasso model with fifteen folds
+m_lasso_train <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds=k, type.measure = "class")
+
+l = m_lasso_train$lambda.min
+coef(m_lasso_train, s=l)
+
+# use the cross-validated lambda in lasso
+m_lasso_train <- glmnet(train[,-11], train$y, alpha=1, family="binomial", lambda = l)
+
+# Optional accuracy on training data
+A = round(accuracy_lasso(m_lasso_train, X, Y), 2)
+cat ("Accuracy on training set is", A, "% for", k, "folds")
+
+# accuracy on test data 
+X <- as.matrix((test[,-11]))
+predicted_probabilities <- predict(m_lasso_train, newx = X, type = "response")
+test_predictions <- 1*(predicted_probabilities > 0.5)
+
+# accuracy on test data - compute by comparing how often predicted Adoption in test_predictions is same as observed Adopt column in the test data)
+A <- (sum(test_predictions == test$y,3)/nrow(test)) * 100
+# or A <- (sum(test_predictions == test[,1],3)/nrow(test)) * 100
+
+cat ("Accuracy on test set is", A, "% for", k, "folds")
+
+}
+```
+**Takeaway 2**: Changing the number of folds in cross-validation doesn't impact the accuracy much.
+
+```{r}
+# optional: try lasso for CV folds = 6...10 using lambda.1se.
+
+for(k in 6:10){
+  # store train data into X (all covariates) and Y (DV = 'Adopt')
+X <- as.matrix(train[,-11])
+Y <- train$y
+
+# Cross-validated lasso model with fifteen folds
+m_lasso_train <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds=k, type.measure = "class")
+
+l = m_lasso_train$lambda.1se
+
+# use the cross-validated lambda in lasso
+m_lasso_train <- glmnet(train[,-11], train$y, alpha=1, family="binomial", lambda = l)
+coef(m_lasso_train, s=l)
+
+# Optional accuracy on training data
+A = round(accuracy_lasso(m_lasso_train, X, Y), 2)
+cat ("Accuracy on training set is", A, "% for", k, "folds")
+
+# accuracy on test data 
+X <- as.matrix((test[,-11]))
+predicted_probabilities <- predict(m_lasso_train, newx = X, type = "response")
+test_predictions <- 1*(predicted_probabilities > 0.5)
+
+# accuracy on test data - compute by comparing how often predicted Adoption in test_predictions is same as observed Adopt column in the test data)
+A <- (sum(test_predictions == test$y,3)/nrow(test)) * 100
+# or A <- (sum(test_predictions == test[,1],3)/nrow(test)) * 100
+
+cat ("Accuracy on test set is", A, "% for", k, "folds")
+
+}
+```
+**Takeaway 3**: Changing the lambda tuning parameter for the penalty impacts accuracy.
+
+```{r}
+# Let's print and see the lambdas in both cases for 10 folds as well as corresponding coefficients
+
+X <- as.matrix(train[,-11])
+Y <- train$y
+m_lasso_train <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds=10, type.measure = "class")
+
+print(m_lasso_train$lambda.min)
+print(m_lasso_train$lambda.1se)
+
+coef(m_lasso_train,  m_lasso_train$lambda.min)
+coef(m_lasso_train,  m_lasso_train$lambda.1se)
+
+# fewer features remain when you use lambda.1se which is higher penalty.
+
+# Helpfu link: https://www.r-bloggers.com/2021/10/lambda-min-lambda-1se-and-cross-validation-in-lasso-binomial-response/
+```
+
+
+
+## Ridge Regression
+
+```{r}
+# store train data into X (all covariates) and Y (DV = 'Adopt')
+X <- as.matrix(train[,-11])
+Y <- train$y
+
+# run ridge regression by setting alpha = 0
+fit <- glmnet(X, Y, alpha=0, family="binomial")
+```
+
+Coefficient path
+
+```{r a, echo=FALSE}
+plot(fit, xlab="L2 Norm")
+```
+
